@@ -1,0 +1,457 @@
+<!doctype html>
+<html>
+<head>
+<title>Particle Fluid</title>
+<meta charset="utf-8">
+<style>
+html
+{
+	background: #202020;
+}
+body
+{
+	margin: 0;
+}
+canvas
+{
+	margin: 10px;
+}
+</style>
+</head>
+<body>
+<canvas id="canvas" width="900" height="900"></canvas>
+<canvas id="trails" width="900" height="900"></canvas>
+<script>
+
+var canvas = document.getElementById('canvas');
+var context = canvas.getContext('2d');
+var trailCanvas = document.getElementById('trails');
+var trails = trailCanvas.getContext('2d');
+
+var cw = canvas.width;
+var ch = canvas.height;
+
+trails.fillStyle = '#000';
+trails.fillRect(0, 0, cw, ch);
+
+var maxDrawnPoints = 5000;
+var maxDrawnTrails = 44;
+var trailClearRate = 2;
+var trailClear = '#010101';
+
+var stepTime = 1 / 100;
+var gravity = 5;
+var pnx = 120;
+var pny = 120;
+var pr = 2;
+var gw = 12;
+var gh = 12;
+
+var initTemp = 90;
+var initVelocity = 30;
+
+var points = [];
+for (var x = 0; x < pnx; x++)
+{
+	for (var y = 0; y < pny; y++)
+	{
+		var point = {};
+		
+		point.x = (x + Math.random()) * cw / pnx;
+		point.y = (y + Math.random()) * ch / pny;
+		// Heat.
+		point.vx = Math.random() * initTemp * 2 - initTemp;
+		point.vy = Math.random() * initTemp * 2 - initTemp;
+		// Swirl.
+		point.vx += -y / pny * initVelocity * 2 + initVelocity;
+		point.vy += x / pnx * initVelocity * 2 - initVelocity;
+		// Jet.
+		//point.vx += 0;
+		//point.vy += Math.abs(x / pnx * initVelocity * 2 - initVelocity) * 1.5 - initVelocity;
+		point.r = pr;
+		point.m = 1;
+		point.c = 'rgba(255, 255, 255, 0.125)';
+		point.pvx = point.vx;
+		point.pvy = point.vy;
+		
+		points.push(point);
+	}
+}
+
+var grid = [];
+for (var x = 0; x < gw; x++)
+{
+	grid.push([]);
+	for (var y = 0; y < gh; y++)
+	{
+		var voxel = {};
+		
+		voxel.n = 0;
+		voxel.d = 0;
+		voxel.t = 0;
+		voxel.tvx = 0;
+		voxel.tvy = 0;
+		
+		grid[x].push(voxel);
+	}
+}
+
+var smw = Math.min(pnx, Math.floor(cw / pr / 4));
+var smh = Math.min(pny, Math.floor(ch / pr / 4));
+var smap = [];
+for (var x = 0; x < smw; x++)
+{
+	smap.push([]);
+	for (var y = 0; y < smh; y++)
+	{
+		var cell = {};
+		
+		cell.n = 0;
+		cell.pis = [];
+		
+		smap[x].push(cell);
+	}
+}
+
+function clearSmap()
+{
+	for (var x = 0; x < smw; x++)
+	{
+		for (var y = 0; y < smh; y++)
+		{
+			smap[x][y].n = 0;
+		}
+	}
+}
+
+function addSmapPoint(pi)
+{
+	var x = Math.round(points[pi].x * smw / cw) - 1;
+	var y = Math.round(points[pi].y * smh / ch) - 1;
+	var cell = smap[x] ? smap[x][y] : 0;
+	if (cell)
+	{
+		cell.pis[cell.n] = pi;
+		cell.n++;
+	}
+	cell = smap[x + 1] ? smap[x + 1][y] : 0;
+	if (cell)
+	{
+		cell.pis[cell.n] = pi;
+		cell.n++;
+	}
+	cell = smap[x] ? smap[x][y + 1] : 0;
+	if (cell)
+	{
+		cell.pis[cell.n] = pi;
+		cell.n++;
+	}
+	cell = smap[x + 1] ? smap[x + 1][y + 1] : 0;
+	if (cell)
+	{
+		cell.pis[cell.n] = pi;
+		cell.n++;
+	}
+}
+
+function getSmapPointsAt(pi, result)
+{
+	result.n = 0;
+	
+	var x = Math.max(0, Math.min(Math.floor(points[pi].x * smw / cw), smw - 1));
+	var y = Math.max(0, Math.min(Math.floor(points[pi].y * smh / ch), smh - 1));
+	var cell = smap[x] ? smap[x][y] : 0;
+	if (!cell)
+	{
+		return;
+	}
+	
+	for (var i = 0; i < cell.n; i++)
+	{
+		if (cell.pis[i] > pi)
+		{
+			result.pis[result.n] = cell.pis[i];
+			result.n++;
+		}
+	}
+}
+
+var collisions = 0;
+
+function updatePointInteraction(point1, point2)
+{
+	var dx = point2.x - point1.x;
+	var dy = point2.y - point1.y;
+	var dms = dx * dx + dy * dy;
+	if (dms == 0)
+	{
+		return;
+	}
+	if (dms > (point1.r + point2.r) * (point1.r + point2.r))
+	{
+		return;
+	}
+	var dm = Math.sqrt(dms);
+	var nx = dx / dm;
+	var ny = dy / dm;
+	var p1_vn = point1.vx * nx + point1.vy * ny;
+	var p2_vn = point2.vx * nx + point2.vy * ny;
+	var f = 2 * (p1_vn - p2_vn) * point1.m * point2.m / (point1.m + point2.m);
+	if (f <= 0)
+	{
+		return;
+	}
+	point1.vx -= f * nx / point1.m;
+	point1.vy -= f * ny / point1.m;
+	point2.vx += f * nx / point2.m;
+	point2.vy += f * ny / point2.m;
+	collisions++;
+}
+
+function updatePoint(point)
+{
+	point.vy += gravity * stepTime;
+	
+	point.x += point.vx * stepTime;
+	point.y += point.vy * stepTime;
+	
+	if (point.x < 0)
+	{
+		point.x = 0;
+		if (point.vx < 0)
+		{
+			point.vx *= -1;
+		}
+	}
+	if (point.y < 0)
+	{
+		point.y = 0;
+		if (point.vy < 0)
+		{
+			point.vy *= -1;
+		}
+	}
+	if (point.x > canvas.width)
+	{
+		point.x = canvas.width;
+		if (point.vx > 0)
+		{
+			point.vx *= -1;
+		}
+	}
+	if (point.y > canvas.height)
+	{
+		point.y = canvas.height;
+		if (point.vy > 0)
+		{
+			point.vy *= -1;
+		}
+	}
+	
+	point.pvx = point.vx;
+	point.pvy = point.py;
+}
+
+function drawPoint(point)
+{
+	context.fillStyle = point.c;
+	context.fillRect(point.x - point.r, point.y - point.r, point.r * 2, point.r * 2);
+}
+
+function drawTrail(point)
+{
+	trails.fillRect(point.x - 1, point.y - 1, 2, 2);
+}
+
+function clearVoxel(voxel)
+{
+	voxel.n = 0;
+	voxel.d = 0;
+	voxel.t = 0;
+	voxel.tvx = 0;
+	voxel.tvy = 0;
+}
+
+function addGridPoint(point)
+{
+	var x = Math.min(gw - 1, Math.floor(point.x * gw / canvas.width));
+	var y = Math.min(gh - 1, Math.floor(point.y * gh / canvas.height));
+	grid[x][y].n++;
+	grid[x][y].d += point.m;
+	grid[x][y].t += Math.sqrt(point.vx * point.vx + point.vy * point.vy) * point.m;
+	grid[x][y].tvx += point.vx;
+	grid[x][y].tvy += point.vy;
+}
+
+var highDs = pnx / gw * pny / gh * 2;
+highDs *= highDs;
+var highTs = Math.sqrt(initTemp * initTemp);
+highTs *= highTs * highDs;
+var highVm = Math.sqrt(initVelocity * initVelocity);
+
+function drawVoxel(x, y, voxel)
+{
+	var r = Math.round(Math.min(255, 255 * voxel.t * voxel.t / highTs));
+	var b = Math.round(Math.min(255, 255 * voxel.d * voxel.d / highDs));
+	
+	var dw = canvas.width / gw;
+	var dh = canvas.height / gh;
+	var dx = x * dw;
+	var dy = y * dh;
+	context.fillStyle = 'rgb(' + r + ', 0, ' + b + ')';
+	context.fillRect(dx, dy, dw, dh);
+}
+
+function drawVelocity(x, y, voxel)
+{
+	var vx = voxel.tvx / (voxel.n + 1);
+	var vy = voxel.tvy / (voxel.n + 1);
+	var vm = Math.sqrt(vx * vx + vy * vy);
+	
+	var r = Math.round(Math.min(255, 255 * voxel.t * voxel.t / highTs));
+	var b = Math.round(Math.min(255, 255 * voxel.d * voxel.d / highDs));
+	var a = Math.min(1, Math.sqrt(vm / highVm));
+	
+	var dw = canvas.width / gw;
+	var dh = canvas.height / gh;
+	var dx = x * dw + dw / 2;
+	var dy = y * dh + dh / 2;
+	var lx = dx + vx * dw / highVm;
+	var ly = dy + vy * dh / highVm;
+	context.strokeStyle = 'rgba(' + r + ', 255, ' + b + ', ' + a + ')';
+	context.beginPath();
+	context.moveTo(dx, dy);
+	context.lineTo(lx, ly);
+	context.stroke();
+}
+
+var interactions = 0;
+
+function update()
+{
+	for (var x = 0; x < gw; x++)
+	{
+		for (var y = 0; y < gh; y++)
+		{
+			clearVoxel(grid[x][y]);
+		}
+	}
+	
+	collisions = 0;
+	interactions = 0;
+	
+	var smapResult = {};
+	smapResult.n = 0;
+	smapResult.pis = [];
+	for (var i = 0; i < points.length; i++)
+	{
+		getSmapPointsAt(i, smapResult);
+		for (var j = 0; j < smapResult.n; j++)
+		{
+			updatePointInteraction(points[i], points[smapResult.pis[j]]);
+			interactions++;
+		}
+	}
+	
+	clearSmap();
+	for (var i = 0; i < points.length; i++)
+	{
+		updatePoint(points[i]);
+		addGridPoint(points[i]);
+		addSmapPoint(i);
+	}
+}
+
+var trailFrame = 0;
+
+function draw()
+{
+	context.fillStyle = '#000';
+	context.fillRect(0, 0, canvas.width, canvas.height);
+	
+	for (var x = 0; x < gw; x++)
+	{
+		for (var y = 0; y < gh; y++)
+		{
+			drawVoxel(x, y, grid[x][y]);
+		}
+	}
+	
+	context.strokeStyle = 'rgba(0, 255, 0, 0.25)';
+	context.lineWidth = 1;
+	context.beginPath();
+	var dw = canvas.width / gw;
+	for (var x = 0; x < gw; x++)
+	{
+		var dx = x * dw + dw / 2;
+		context.moveTo(dx, 0);
+		context.lineTo(dx, canvas.height);
+	}
+	var dh = canvas.height / gh;
+	for (var y = 0; y < gh; y++)
+	{
+		var dy = y * dh + dh / 2;
+		context.moveTo(0, dy);
+		context.lineTo(canvas.height, dy);
+	}
+	context.stroke();
+	
+	if (maxDrawnPoints > 0)
+	{
+		for (var i = 0; i < points.length; i += Math.ceil(points.length / maxDrawnPoints))
+		{
+			drawPoint(points[i]);
+		}
+	}
+	
+	context.lineWidth = 4;
+	for (var x = 0; x < gw; x++)
+	{
+		for (var y = 0; y < gh; y++)
+		{
+			drawVelocity(x, y, grid[x][y]);
+		}
+	}
+	
+	context.fillStyle = '#fff';
+	context.font = 'bold 20px monospace';
+	context.textBaseline = 'top';
+	context.fillText('Interactions: ' + interactions, 5, 5);
+	context.fillText('Collisions: ' + collisions, 5, 30);
+	
+	if (maxDrawnTrails > 0)
+	{
+		trailFrame = trailFrame % trailClearRate + 1;
+		if (trailFrame == 1)
+		{
+			trails.fillStyle = '#fff';
+			trails.globalCompositeOperation = 'difference';
+			trails.fillRect(0, 0, cw, ch);
+			trails.fillStyle = trailClear;
+			trails.globalCompositeOperation = 'lighter';
+			trails.fillRect(0, 0, cw, ch);
+			trails.fillStyle = '#fff';
+			trails.globalCompositeOperation = 'difference';
+			trails.fillRect(0, 0, cw, ch);
+			trails.globalCompositeOperation = 'source-over';
+		}
+		
+		trails.fillStyle = '#fff';
+		for (var i = 0; i < points.length; i += Math.ceil(points.length / maxDrawnTrails))
+		{
+			drawTrail(points[i]);
+		}
+	}
+}
+
+function step()
+{
+	update();
+	draw();
+}
+
+setInterval(step, 1000 * stepTime);
+
+</script>
+</body>
+</html>
